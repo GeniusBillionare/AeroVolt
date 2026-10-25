@@ -28,7 +28,7 @@ local oldGui = PG:FindFirstChild("AerovoltClient"); if oldGui then oldGui:Destro
 local oldBlur = Lighting:FindFirstChild("AerovoltBlur"); if oldBlur then oldBlur:Destroy() end
 pcall(function() RunService:UnbindFromRenderStep("AerovoltRender") end)
 
-local CLIENT, VERSION = "AEROVOLT", "v2.9"
+local CLIENT, VERSION = "AEROVOLT", "v2.10"
 local FONT, FONT_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
 
 ----------------------------------------------------------------------
@@ -103,7 +103,7 @@ local C_DIM, C_LIGHT, WHITE = Color3.fromRGB(135, 135, 150), Color3.fromRGB(200,
 ----------------------------------------------------------------------
 local Categories = { "Combat", "Movement", "Player", "Render", "Utility", "Settings" }
 local CatDesc = {
-	Combat = "Aim helpers, hitbox tools and targeting.",
+	Combat = "Aim helpers, hitbox tools and targeting for your own game.",
 	Movement = "Modules that change how you move around the world.",
 	Player = "Modules that change or protect your own character.",
 	Render = "Modules that change what you see on your screen.",
@@ -1203,8 +1203,14 @@ local GuiSettings = Module{ Name = "GUI", Category = "Settings", Desc = "Control
 		Toggle("Background Dim", true, "Darkens the game behind the menu while it is open."),
 		Toggle("Descriptions", true, "Shows a short description of whatever you hover over. Turn off to hide them completely."),
 		Mode("Description Style", { "Cursor", "Bottom Bar" }, "Cursor", "Cursor shows a small tip next to your mouse. Bottom Bar pins it to the bottom of the screen."),
+		Toggle("High Slider Values", false, "Raises the maximum of speed, distance and size sliders far beyond their normal limits."),
 	},
-	OnChanged = function() ui.ApplyInterface() end }
+	OnChanged = function(m, name)
+		if name == "High Slider Values" and ui.OnHighChanged then ui.OnHighChanged() end
+		ui.ApplyInterface()
+	end }
+Module{ Name = "Save Settings", Category = "Settings", Desc = "Saves every module, setting, keybind and panel position. They load automatically next time.",
+	Action = function() ui.SaveConfig() end }
 Module{ Name = "Reset Panels", Category = "Settings", Desc = "Puts every panel back in its default position.",
 	Action = function() ui.ResetPanels() end }
 Module{ Name = "Panic", Category = "Settings", Desc = "Instantly turns off every module. Use it if something goes wrong.",
@@ -1213,6 +1219,123 @@ Module{ Name = "Panic", Category = "Settings", Desc = "Instantly turns off every
 		ui.RebuildList(); ui.Notify("All modules disabled", false)
 	end }
 Module{ Name = "Unload", Category = "Settings", Desc = "Completely removes Aerovolt from your game until you run it again.", Action = function() ui.Unload() end }
+
+----------------------------------------------------------------------
+-- high slider values + config file (writefile / readfile from the executor's file library)
+----------------------------------------------------------------------
+do
+	local FILE = "AerovoltConfig.json"
+	local HttpService = game:GetService("HttpService")
+	ui.ConfigFile = FILE
+	ui.CanFS = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+	ui.SliderRows = {}
+
+	-- "Module.Setting" -> highest value while High Slider Values is on
+	ui.HighMax = {
+		["Speed.Speed"] = 900, ["Fly.Speed"] = 1500, ["Fly.Vertical"] = 900, ["VehicleFly.Speed"] = 2000, ["VehicleFly.Vertical"] = 1200,
+		["InfiniteJump.Power"] = 500, ["HighJump.Power"] = 1500, ["Bhop.Boost"] = 150, ["Glide.Fall Speed"] = 200,
+		["Spider.Speed"] = 300, ["Gravity.Gravity"] = 1500, ["Dash.Power"] = 1000, ["Spinbot.Speed"] = 240, ["HipHeight.Height"] = 150,
+		["NoFall.Threshold"] = 400, ["AntiFling.Threshold"] = 5000, ["Follow.Distance"] = 200,
+		["ESP.Max Distance"] = 20000, ["NameTags.Max Distance"] = 20000, ["Tracers.Max Distance"] = 20000, ["Chams.Max Distance"] = 20000,
+		["CamDistance.Max Zoom"] = 10000, ["Freecam.Speed"] = 1000,
+		["Hitbox Visualizer.Max Distance"] = 20000, ["Hitbox Expander.Size"] = 200, ["FOV Circle.Radius"] = 1500,
+		["Aim Assist.Max Distance"] = 10000, ["Aim Assist.Pull Speed"] = 720, ["Aimbot.Max Distance"] = 10000, ["Triggerbot.Max Distance"] = 10000,
+	}
+	for _, m in ipairs(Modules) do
+		for _, st in ipairs(m.Settings or {}) do
+			if st.Type == "Slider" then st.High = ui.HighMax[m.Name .. "." .. st.Name] end
+		end
+	end
+
+	function ui.MaxOf(st)
+		return (GuiSettings.Values["High Slider Values"] and st.High) or st.Max
+	end
+
+	-- pulls any value that is above the current maximum back down; returns what it changed
+	function ui.ClampSliders()
+		local changedList = {}
+		for _, m in ipairs(Modules) do
+			for _, st in ipairs(m.Settings or {}) do
+				if st.Type == "Slider" then
+					local v, lim = m.Values[st.Name], ui.MaxOf(st)
+					if type(v) == "number" and v > lim then
+						m.Values[st.Name] = lim
+						table.insert(changedList, { m, st.Name })
+					end
+				end
+			end
+		end
+		return changedList
+	end
+
+	function ui.EncodeValue(v)
+		if typeof(v) == "Color3" then return { t = "Color3", r = v.R, g = v.G, b = v.B } end
+		return v
+	end
+	local function decode(v)
+		if type(v) == "table" and v.t == "Color3" and type(v.r) == "number" and type(v.g) == "number" and type(v.b) == "number" then
+			return Color3.new(math.clamp(v.r, 0, 1), math.clamp(v.g, 0, 1), math.clamp(v.b, 0, 1))
+		end
+		return v
+	end
+
+	-- returns the saved config, or nil when there is no file / it can't be read (defaults are used then)
+	function ui.ReadConfig()
+		if not ui.CanFS then return nil end
+		local okF, exists = pcall(isfile, FILE)
+		if not okF or not exists then return nil end
+		local ok, data = pcall(function() return HttpService:JSONDecode(readfile(FILE)) end)
+		if ok and type(data) == "table" and type(data.modules) == "table" then return data end
+		return nil
+	end
+
+	-- settings, keybinds and bind modes (before the menu is built so every row shows the loaded value)
+	function ui.ApplyConfigValues(cfg)
+		for _, m in ipairs(Modules) do
+			local e = cfg.modules[m.Name]
+			if type(e) == "table" then
+				if type(e.values) == "table" then
+					for _, st in ipairs(m.Settings or {}) do
+						local v = decode(e.values[st.Name])
+						if v ~= nil then
+							if st.Type == "Slider" and type(v) == "number" then
+								m.Values[st.Name] = math.clamp(v, st.Min, st.High or st.Max)
+							elseif st.Type == "Toggle" and type(v) == "boolean" then
+								m.Values[st.Name] = v
+							elseif st.Type == "Mode" and type(v) == "string" then
+								if type(st.Options) == "function" or table.find(st.Options, v) then m.Values[st.Name] = v end
+							elseif st.Type == "Color" and typeof(v) == "Color3" then
+								m.Values[st.Name] = v
+							end
+						end
+					end
+				end
+				if type(e.bind) == "string" then
+					local ok, key = pcall(function() return Enum.KeyCode[e.bind] end)
+					if ok and key then m.Bind = key end
+				end
+				if e.bindMode == "Hold" or e.bindMode == "Toggle" then m.BindMode = e.bindMode end
+			end
+		end
+		ui.ClampSliders() -- the High Slider Values toggle itself was just loaded, so settle the limits
+		for _, m in ipairs(Modules) do
+			if m.Name == "Theme" and m.OnChanged then Safe(m.OnChanged, m, "Color") end
+		end
+	end
+
+	-- which modules were on
+	function ui.ApplyConfigEnabled(cfg)
+		for _, m in ipairs(Modules) do
+			local e = cfg.modules[m.Name]
+			if type(e) == "table" and type(e.enabled) == "boolean" and not m.Action and not m.Passive then
+				SetEnabled(m, e.enabled, true)
+			end
+		end
+	end
+
+	ui.Config = ui.ReadConfig()
+	if ui.Config then ui.ApplyConfigValues(ui.Config) end
+end
 
 ----------------------------------------------------------------------
 -- main loop
@@ -1743,15 +1866,17 @@ local function SliderRow(m, s, parent, order)
 	local valL = RightLabel(row)
 	local function show()
 		local v = m.Values[s.Name]
-		fill.Size = UDim2.fromScale(math.clamp((v - s.Min) / (s.Max - s.Min), 0, 1), 1)
+		fill.Size = UDim2.fromScale(math.clamp((v - s.Min) / (ui.MaxOf(s) - s.Min), 0, 1), 1)
 		valL.Text = Fmt(v)
 	end
 	show()
+	table.insert(ui.SliderRows, { row = row, show = show })
 	local function setFromX(x)
 		local a = math.clamp((x - row.AbsolutePosition.X) / math.max(row.AbsoluteSize.X, 1), 0, 1)
-		local v = s.Min + (s.Max - s.Min) * a
+		local hi = ui.MaxOf(s)
+		local v = s.Min + (hi - s.Min) * a
 		v = s.Min + math.floor((v - s.Min) / s.Step + 0.5) * s.Step
-		v = tonumber(string.format("%.4f", math.clamp(v, s.Min, s.Max)))
+		v = tonumber(string.format("%.4f", math.clamp(v, s.Min, hi)))
 		m.Values[s.Name] = v
 		show(); changed(m, s.Name)
 	end
@@ -1762,6 +1887,22 @@ local function SliderRow(m, s, parent, order)
 		end
 	end)
 	return row
+end
+
+function ui.RefreshSliders()
+	local list = ui.SliderRows
+	for i = #list, 1, -1 do
+		local r = list[i]
+		if r.row.Parent then r.show() else table.remove(list, i) end
+	end
+end
+function ui.OnHighChanged()
+	for _, c in ipairs(ui.ClampSliders()) do
+		local m = c[1]
+		if m.OnChanged then Safe(m.OnChanged, m, c[2]) end
+	end
+	ui.RefreshSliders()
+	ui.RebuildList()
 end
 
 local function ToggleRow(m, s, parent, order)
@@ -2085,6 +2226,58 @@ end
 ui.ResetPanels()
 HubRefresh()
 
+function ui.SaveConfig()
+	if not ui.CanFS then
+		ui.Notify("Saving needs an executor with writefile and readfile", false)
+		return
+	end
+	local cfg = { version = VERSION, modules = {}, panels = {} }
+	for _, m in ipairs(Modules) do
+		local e = { values = {}, bindMode = m.BindMode }
+		if m.Bind then e.bind = m.Bind.Name end
+		if not m.Action and not m.Passive then e.enabled = m.Enabled end
+		for _, st in ipairs(m.Settings or {}) do e.values[st.Name] = ui.EncodeValue(m.Values[st.Name]) end
+		cfg.modules[m.Name] = e
+	end
+	cfg.panels.Hub = { x = HubPanel.Position.X.Offset, y = HubPanel.Position.Y.Offset, collapsed = not HubContent.Visible }
+	for i, cat in ipairs(Categories) do
+		local p = PanelFrames[i]
+		cfg.panels[cat] = { x = p.Position.X.Offset, y = p.Position.Y.Offset, open = p.Visible, collapsed = not PanelContents[i].Visible }
+	end
+	local ok, err = pcall(function()
+		writefile(ui.ConfigFile, game:GetService("HttpService"):JSONEncode(cfg))
+	end)
+	if ok then
+		ui.Notify("Settings saved", true)
+	else
+		ui.Notify("Could not save settings", false)
+		warn("[Aerovolt] " .. tostring(err))
+	end
+end
+
+-- panel positions, which tabs are open and which are collapsed
+function ui.ApplyLayout(cfg)
+	local P = cfg.panels
+	if type(P) ~= "table" then return end
+	local function place(panel, e)
+		if type(e) == "table" and type(e.x) == "number" and type(e.y) == "number" then
+			panel.Position = UDim2.fromOffset(e.x, e.y)
+		end
+	end
+	place(HubPanel, P.Hub)
+	if type(P.Hub) == "table" then HubContent.Visible = P.Hub.collapsed ~= true end
+	for i, cat in ipairs(Categories) do
+		local e = P[cat]
+		if type(e) == "table" then
+			place(PanelFrames[i], e)
+			if type(e.open) == "boolean" then PanelFrames[i].Visible = e.open end
+			PanelContents[i].Visible = e.collapsed ~= true
+		end
+	end
+	HubRefresh()
+	ui.ClampPanels()
+end
+
 ----------------------------------------------------------------------
 -- search
 ----------------------------------------------------------------------
@@ -2251,4 +2444,9 @@ end
 SetEnabled(ArrayList, true, true)
 SetEnabled(Notifs, true, true)
 SetEnabled(HUDm, true, true)
-ui.Notify("Aerovolt loaded - press " .. GuiSettings.Values["Menu Key"] .. " to open the menu", true)
+-- a saved config overrides the defaults above; with no file (or no file functions) the defaults stay
+if ui.Config then
+	ui.ApplyConfigEnabled(ui.Config)
+	ui.ApplyLayout(ui.Config)
+end
+ui.Notify("Aerovolt loaded" .. (ui.Config and " (config loaded)" or "") .. " - press " .. GuiSettings.Values["Menu Key"] .. " to open the menu", true)
