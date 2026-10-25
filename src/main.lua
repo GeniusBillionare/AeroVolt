@@ -28,7 +28,7 @@ local oldGui = PG:FindFirstChild("AerovoltClient"); if oldGui then oldGui:Destro
 local oldBlur = Lighting:FindFirstChild("AerovoltBlur"); if oldBlur then oldBlur:Destroy() end
 pcall(function() RunService:UnbindFromRenderStep("AerovoltRender") end)
 
-local CLIENT, VERSION = "AEROVOLT", "v2.10"
+local CLIENT, VERSION = "AEROVOLT", "v2.11"
 local FONT, FONT_B = Enum.Font.GothamMedium, Enum.Font.GothamBold
 
 ----------------------------------------------------------------------
@@ -336,6 +336,83 @@ Module{ Name = "VehicleFly", Category = "Movement", Desc = "Fly the seat or vehi
 		if flat.Magnitude > 0.05 then m._yaw = math.atan2(-flat.X, -flat.Z) end
 		m._ao.CFrame = CFrame.fromOrientation(0, m._yaw, 0) * m._rel:Inverse()
 		m._lv.VectorVelocity = m._vel
+	end }
+
+-- AirWalk and Jesus put an invisible floor under your feet (only on your client), so you stand on it
+-- and the normal idle / walking animations play instead of the falling one.
+ui.Plats = {}
+function ui.MakePlatform(name)
+	return New("Part", { Name = name, Anchored = true, CanCollide = true, CanTouch = false, Transparency = 1, Size = Vector3.new(10, 1, 10), TopSurface = Enum.SurfaceType.Smooth, BottomSurface = Enum.SurfaceType.Smooth }, workspace)
+end
+function ui.DropPlatform(key)
+	local p = ui.Plats[key]
+	if p then p:Destroy(); ui.Plats[key] = nil end
+end
+-- height of the bottom of your feet
+function ui.FeetY(r, h)
+	local legs = h.RigType == Enum.HumanoidRigType.R6 and 2 or h.HipHeight
+	return r.Position.Y - legs - r.Size.Y / 2
+end
+
+Module{ Name = "AirWalk", Category = "Movement", Desc = "Lets you walk on thin air without falling, with your normal walking animations. Hold Left Ctrl to lower the floor.",
+	Settings = {
+		Toggle("Step Up", false, "Jump to climb: the invisible floor rises to where your jump peaks."),
+		Slider("Lower Speed", 5, 80, 1, 25, "How fast the floor drops while you hold Left Ctrl."),
+	},
+	OnEnable = function(m)
+		local r, h = Root(), Hum()
+		if r and h then
+			m._level, m._char, m._prevVy = ui.FeetY(r, h), LP.Character, 0
+			local v = r.AssemblyLinearVelocity
+			r.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+		end
+	end,
+	OnDisable = function() ui.DropPlatform("Air") end,
+	OnTick = function(m, dt)
+		local r, h = Root(), Hum(); if not r or not h then return end
+		if m._char ~= LP.Character or not m._level then
+			m._level, m._char, m._prevVy = ui.FeetY(r, h), LP.Character, 0
+		end
+		local V = m.Values
+		if Down(Enum.KeyCode.LeftControl) then m._level -= V["Lower Speed"] * dt end
+		local vy = r.AssemblyLinearVelocity.Y
+		if V["Step Up"] then
+			local feet = ui.FeetY(r, h)
+			-- at the top of a jump, move the floor up to your feet
+			if m._prevVy > 0 and vy <= 0 and feet > m._level + 1 then m._level = feet - 0.05 end
+		end
+		m._prevVy = vy
+		local plat = ui.Plats.Air
+		if not plat or not plat.Parent then plat = ui.MakePlatform("AerovoltAirWalk"); ui.Plats.Air = plat end
+		plat.CFrame = CFrame.new(r.Position.X, m._level - plat.Size.Y / 2, r.Position.Z)
+	end }
+
+Module{ Name = "Jesus", Category = "Movement", Desc = "Lets you walk on top of water. Hold Left Ctrl to sink.",
+	Settings = { Slider("Swim Up Speed", 5, 60, 1, 20, "How fast you rise to the surface if you are already in the water.") },
+	OnDisable = function() ui.DropPlatform("Jesus") end,
+	OnTick = function(m)
+		local r, h = Root(), Hum(); if not r or not h then return end
+		local sinking = Down(Enum.KeyCode.LeftControl)
+		local plat = ui.Plats.Jesus
+		local params = RayParams()
+		params.IgnoreWater = false
+		local skip = { LP.Character }
+		if ui.Plats.Air then table.insert(skip, ui.Plats.Air) end
+		if plat then table.insert(skip, plat) end
+		params.FilterDescendantsInstances = skip
+		local hit = workspace:Raycast(r.Position + Vector3.new(0, 4, 0), Vector3.new(0, -60, 0), params)
+		if hit and hit.Material == Enum.Material.Water and not sinking then
+			if not plat or not plat.Parent then plat = ui.MakePlatform("AerovoltJesus"); ui.Plats.Jesus = plat end
+			plat.CanCollide = true
+			plat.CFrame = CFrame.new(r.Position.X, hit.Position.Y - plat.Size.Y / 2, r.Position.Z)
+		elseif plat then
+			plat.CanCollide = false
+		end
+		-- already swimming: float up until the surface floor can catch you
+		if not sinking and h:GetState() == Enum.HumanoidStateType.Swimming then
+			local v = r.AssemblyLinearVelocity
+			r.AssemblyLinearVelocity = Vector3.new(v.X, m.Values["Swim Up Speed"], v.Z)
+		end
 	end }
 
 Module{ Name = "Noclip", Category = "Movement", Desc = "Turns off collision on your character so you can walk through walls and objects. Floors still hold you up.",
@@ -1204,9 +1281,11 @@ local GuiSettings = Module{ Name = "GUI", Category = "Settings", Desc = "Control
 		Toggle("Descriptions", true, "Shows a short description of whatever you hover over. Turn off to hide them completely."),
 		Mode("Description Style", { "Cursor", "Bottom Bar" }, "Cursor", "Cursor shows a small tip next to your mouse. Bottom Bar pins it to the bottom of the screen."),
 		Toggle("High Slider Values", false, "Raises the maximum of speed, distance and size sliders far beyond their normal limits."),
+		Toggle("Keep Across Teleports", false, "Reloads Aerovolt with your current settings after a rejoin or teleport. Needs this script saved as Aerovolt.lua in your executor workspace."),
 	},
 	OnChanged = function(m, name)
 		if name == "High Slider Values" and ui.OnHighChanged then ui.OnHighChanged() end
+		if name == "Keep Across Teleports" and ui.SetKeep then ui.SetKeep(m.Values[name]) end
 		ui.ApplyInterface()
 	end }
 Module{ Name = "Save Settings", Category = "Settings", Desc = "Saves every module, setting, keybind and panel position. They load automatically next time.",
@@ -1227,6 +1306,9 @@ do
 	local FILE = "AerovoltConfig.json"
 	local HttpService = game:GetService("HttpService")
 	ui.ConfigFile = FILE
+	ui.SessionFile = "AerovoltSession.json"
+	ui.KeepFile = "AerovoltKeep.txt"
+	ui.LoaderFile = "Aerovolt.lua"
 	ui.CanFS = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
 	ui.SliderRows = {}
 
@@ -1280,11 +1362,12 @@ do
 	end
 
 	-- returns the saved config, or nil when there is no file / it can't be read (defaults are used then)
-	function ui.ReadConfig()
+	function ui.ReadConfig(file)
+		file = file or FILE
 		if not ui.CanFS then return nil end
-		local okF, exists = pcall(isfile, FILE)
+		local okF, exists = pcall(isfile, file)
 		if not okF or not exists then return nil end
-		local ok, data = pcall(function() return HttpService:JSONDecode(readfile(FILE)) end)
+		local ok, data = pcall(function() return HttpService:JSONDecode(readfile(file)) end)
 		if ok and type(data) == "table" and type(data.modules) == "table" then return data end
 		return nil
 	end
@@ -1333,8 +1416,42 @@ do
 		end
 	end
 
-	ui.Config = ui.ReadConfig()
-	if ui.Config then ui.ApplyConfigValues(ui.Config) end
+	-- Keep Across Teleports: queue_on_teleport only runs after a teleport / rejoin from this game, never on a
+	-- normal join, and the queued code does nothing unless the keep flag file still says "1".
+	local PAYLOAD = 'if isfile("AerovoltKeep.txt") and readfile("AerovoltKeep.txt") == "1" and isfile("Aerovolt.lua") then loadstring(readfile("Aerovolt.lua"))() end'
+	function ui.QueuePersist()
+		if ui._queued then return end
+		if type(queue_on_teleport) ~= "function" then
+			ui.Notify("Your executor has no queue_on_teleport, so settings can't carry over", false)
+			return
+		end
+		ui._queued = true
+		queue_on_teleport(PAYLOAD)
+	end
+	function ui.SetKeep(on)
+		if not ui.CanFS then
+			ui.Notify("Keeping settings needs an executor with file functions", false)
+			return
+		end
+		pcall(writefile, ui.KeepFile, on and "1" or "0")
+		if on then
+			local okF, has = pcall(isfile, ui.LoaderFile)
+			if not (okF and has) then
+				ui.Notify("Save this script as Aerovolt.lua in your executor's workspace folder first", false)
+			end
+			ui.QueuePersist()
+		end
+	end
+
+	-- a session file written right before a teleport (under 2 minutes old) beats the saved config once
+	local cfg = ui.ReadConfig(ui.SessionFile)
+	if cfg and type(cfg.t) == "number" and math.abs(os.time() - cfg.t) < 120 then
+		ui.FromSession = true
+	else
+		cfg = ui.ReadConfig()
+	end
+	ui.Config = cfg
+	if cfg then ui.ApplyConfigValues(cfg) end
 end
 
 ----------------------------------------------------------------------
@@ -2226,11 +2343,7 @@ end
 ui.ResetPanels()
 HubRefresh()
 
-function ui.SaveConfig()
-	if not ui.CanFS then
-		ui.Notify("Saving needs an executor with writefile and readfile", false)
-		return
-	end
+function ui.BuildConfig()
 	local cfg = { version = VERSION, modules = {}, panels = {} }
 	for _, m in ipairs(Modules) do
 		local e = { values = {}, bindMode = m.BindMode }
@@ -2244,8 +2357,16 @@ function ui.SaveConfig()
 		local p = PanelFrames[i]
 		cfg.panels[cat] = { x = p.Position.X.Offset, y = p.Position.Y.Offset, open = p.Visible, collapsed = not PanelContents[i].Visible }
 	end
+	return cfg
+end
+
+function ui.SaveConfig()
+	if not ui.CanFS then
+		ui.Notify("Saving needs an executor with writefile and readfile", false)
+		return
+	end
 	local ok, err = pcall(function()
-		writefile(ui.ConfigFile, game:GetService("HttpService"):JSONEncode(cfg))
+		writefile(ui.ConfigFile, game:GetService("HttpService"):JSONEncode(ui.BuildConfig()))
 	end)
 	if ok then
 		ui.Notify("Settings saved", true)
@@ -2253,6 +2374,16 @@ function ui.SaveConfig()
 		ui.Notify("Could not save settings", false)
 		warn("[Aerovolt] " .. tostring(err))
 	end
+end
+
+-- written right before a rejoin or teleport, so the next session picks up exactly where this one left off
+function ui.SaveSession()
+	if not ui.CanFS then return end
+	pcall(function()
+		local cfg = ui.BuildConfig()
+		cfg.t = os.time()
+		writefile(ui.SessionFile, game:GetService("HttpService"):JSONEncode(cfg))
+	end)
 end
 
 -- panel positions, which tabs are open and which are collapsed
@@ -2449,4 +2580,10 @@ if ui.Config then
 	ui.ApplyConfigEnabled(ui.Config)
 	ui.ApplyLayout(ui.Config)
 end
-ui.Notify("Aerovolt loaded" .. (ui.Config and " (config loaded)" or "") .. " - press " .. GuiSettings.Values["Menu Key"] .. " to open the menu", true)
+Conn(LP.OnTeleport, function(state)
+	if GuiSettings.Values["Keep Across Teleports"] and (state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress) then
+		ui.SaveSession()
+	end
+end)
+if GuiSettings.Values["Keep Across Teleports"] then ui.SetKeep(true) end
+ui.Notify("Aerovolt loaded" .. (ui.Config and (ui.FromSession and " (restored after teleport)" or " (config loaded)") or "") .. " - press " .. GuiSettings.Values["Menu Key"] .. " to open the menu", true)
